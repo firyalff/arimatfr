@@ -13,37 +13,17 @@ connection = pymysql.connect(host='localhost',
                              cursorclass=pymysql.cursors.DictCursor)
 
 asfrs= []
-print(asfrs)
-# fetching data for ASFR projection, then store it in list
-try:
+
+def updatePredictionData (age, year, prediction):
     with connection.cursor() as cursor:
-        # selecting age range in data
-        sql = "SELECT min(age) as minage, max(age) as maxage FROM asfr"
+        sql = "UPDATE asfr SET prediction= %s WHERE age = %s AND year = %s" % (prediction[0], age, year)
+        print(sql)
         cursor.execute(sql)
-        agerange = cursor.fetchone()
-        
-        # Store data in vector
-        for x in range(agerange["minage"], agerange["maxage"]+1):
-            sql = "SELECT (rate*1000) as rate FROM asfr where age = %s"
-            cursor.execute(sql, (x))
-            result = cursor.fetchall()
+    connection.commit()
+    return
 
-            asfr= []
-
-            for data in result:
-                asfr.append(round(data['rate'], 3))
-            
-            asfrs.append(asfr)
-            
-finally:
-    connection.close()
-
-print(asfrs)
-
-#project each asfr in list 
-for asfrdata in asfrs:
+def projectionARIMA (asfrdata, processedAge):
     X = asfrdata
-
     size = int(len(X) * 0.66)
     train, test = X[0:size], X[size:len(X)]
 
@@ -57,7 +37,9 @@ for asfrdata in asfrs:
         predictions.append(yhat)
         obs = test[t]
         history.append(obs)
-        print('predicted=%f, expected=%f' % (yhat, obs))
+        currentyear= agerange['maxyear']-(len(X)-size-t-1)
+        print('currentyear=%d ||| predicted=%f ||| expected=%f' % (currentyear, yhat, obs))
+        updatePredictionData(processedAge, currentyear, yhat)
     
     error = mean_squared_error(test, predictions)
 
@@ -66,3 +48,33 @@ for asfrdata in asfrs:
     pyplot.plot(test)
     pyplot.plot(predictions, color='red')
     pyplot.show()
+    return
+
+
+
+
+# fetching data for ASFR projection, then project ASFR
+try:
+    with connection.cursor() as cursor:
+        # selecting age range in data
+        sql = "SELECT min(age) as minage, max(age) as maxage, min(year) as minyear, max(year) as maxyear FROM asfr"
+        cursor.execute(sql)
+        agerange = cursor.fetchone()
+        
+        # Store data in vector
+        for x in range(agerange["minage"], agerange["maxage"]):
+            sql = "SELECT (rate*1000) as rate FROM asfr where age = %s ORDER BY year ASC"
+            cursor.execute(sql, (x))
+            result = cursor.fetchall()
+
+            asfr= []
+
+            for data in result:
+                asfr.append(round(data['rate'], 3))
+                
+            print('Current age = %d' % (x))
+            projectionARIMA(asfr, x)
+            
+finally:
+    connection.close()
+
