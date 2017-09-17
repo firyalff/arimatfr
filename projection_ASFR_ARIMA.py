@@ -1,8 +1,20 @@
 import pymysql.cursors
-#from pandas import read_csv
+import pandas as pd
 from matplotlib import pyplot
 from statsmodels.tsa.arima_model import ARIMA
 from sklearn.metrics import mean_squared_error
+from sklearn.metrics import mean_absolute_error
+import uuid
+import time
+import datetime
+import metrics
+
+#get current timestamp
+ts = time.time()
+timestamp = str(datetime.datetime.fromtimestamp(ts).strftime('%Y-%m-%d %H:%M:%S'))
+
+#set prediction batch id
+batchid= str(uuid.uuid4())
 
 # Connect to the database
 connection = pymysql.connect(host='localhost',
@@ -12,25 +24,36 @@ connection = pymysql.connect(host='localhost',
                              charset='utf8mb4',
                              cursorclass=pymysql.cursors.DictCursor)
 
-asfrs= []
-
-def updatePredictionData (age, year, prediction):
+#insert prediction to database
+def updatePredictionData (age, year, prediction, model):
+    prediction= str(prediction)
     with connection.cursor() as cursor:
-        sql = "UPDATE asfr SET prediction= %s WHERE age = %s AND year = %s" % (prediction[0], age, year)
-        print(sql)
-        cursor.execute(sql)
+        sql = "INSERT INTO asfr_prediction (batch_id, model, year, age, prediction, created_at) VALUES (%s, %s, %s, %s, %s, %s)"
+        cursor.execute(sql, (batchid, model, year, age, prediction, timestamp))
     connection.commit()
     return
 
-def projectionARIMA (asfrdata, processedAge):
+#mse logging
+def logMSE (batchId, age, error):
+    with connection.cursor() as cursor:
+        sql = "INSERT INTO asfr_error_log (batch_id, age, mean_squared_error, mean_absolute_error) VALUES (%s, %s, %s, %s)"
+        cursor.execute(sql, (batchid, age, str(error[0]), str(error[1])))
+    connection.commit()
+    return
+    
+#projection function
+def projectionARIMA (asfrdata, processedAge, p, d, q):
     X = asfrdata
+    
+    currentmodel= 'ARIMA %d, %d, %d' % (p, d, q)
+    
     size = int(len(X) * 0.66)
     train, test = X[0:size], X[size:len(X)]
 
     history = [x for x in train]
     predictions = list()
     for t in range(len(test)):
-        model = ARIMA(history, order=(5,1,0))
+        model = ARIMA(history, order=(p,d,q))
         model_fit = model.fit(disp=0)
         output = model_fit.forecast()
         yhat = output[0]
@@ -38,17 +61,22 @@ def projectionARIMA (asfrdata, processedAge):
         obs = test[t]
         history.append(obs)
         currentyear= agerange['maxyear']-(len(X)-size-t-1)
-        print('currentyear=%d ||| predicted=%f ||| expected=%f' % (currentyear, yhat, obs))
-        updatePredictionData(processedAge, currentyear, yhat)
+        #print('currentyear=%d ||| predicted=%f ||| expected=%f' % (currentyear, yhat, obs))
+        updatePredictionData(processedAge, currentyear, yhat[0], currentmodel)
     
-    error = mean_squared_error(test, predictions)
+    MSerror = mean_squared_error(test, predictions)
+    MAerror = mean_absolute_error(test, predictions)
+    
+    train= pd.DataFrame(train)
+    
+    MASerror = metrics.MASE(train, pd.DataFrame(test), pd.DataFrame(predictions))
 
-    print('Test MSE: %.3f' % error)
+    print(MASerror)
 
     pyplot.plot(test)
     pyplot.plot(predictions, color='red')
     pyplot.show()
-    return
+    return MSerror, MAerror
 
 
 
@@ -73,7 +101,10 @@ try:
                 asfr.append(round(data['rate'], 3))
                 
             print('Current age = %d' % (x))
-            projectionARIMA(asfr, x)
+            p, d, q= 2, 1, 1
+            result= projectionARIMA(asfr, x, p, d, q)
+            print('MSE: %.3f  |||   MAE: %.3f' % (result[0], result[1]))
+            logMSE(batchid, x, result)
             
 finally:
     connection.close()
